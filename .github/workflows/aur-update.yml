@@ -170,26 +170,20 @@ jobs:
           pkgbase=$(sed -n 's/^pkgbase = //p' .SRCINFO)
           [[ -n $pkgbase ]] || { echo '::error::cannot read pkgbase from .SRCINFO'; exit 1; }
 
-          install -d -m 700 ~/.ssh
-          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
-          chmod 600 ~/.ssh/aur
-          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
-          cat > ~/.ssh/config <<'EOF'
-          Host aur.archlinux.org
-            IdentityFile ~/.ssh/aur
-            User aur
-            StrictHostKeyChecking yes
-          EOF
-          chmod 600 ~/.ssh/config
+          # Do NOT rely on ~/.ssh here: this container sets HOME=/github/home,
+          # but OpenSSH expands ~ from the passwd entry (/root), so a keyscan
+          # into ~/.ssh/known_hosts lands somewhere ssh never reads. Pass every
+          # path explicitly through GIT_SSH_COMMAND instead.
+          keyfile=$(mktemp)
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > "$keyfile"
+          chmod 600 "$keyfile"
+          known=$(mktemp)
+          ssh-keyscan -t ed25519 aur.archlinux.org > "$known" 2>/dev/null
+          [[ -s $known ]] || { echo '::error::could not fetch the AUR host key'; exit 1; }
+          export GIT_SSH_COMMAND="ssh -i ${keyfile} -o IdentitiesOnly=yes -o UserKnownHostsFile=${known} -o StrictHostKeyChecking=yes"
 
           workdir=$(mktemp -d)
-          # AUR creates the git repo only after the package has been submitted
-          # once through the web UI; until then the clone fails. Report that as
-          # a notice instead of a red build, because nothing here can fix it.
-          if ! git clone "ssh://aur@aur.archlinux.org/${pkgbase}.git" "$workdir"; then
-            echo "::notice::AUR package '${pkgbase}' does not exist yet. Submit it once at https://aur.archlinux.org/submit/ with this PKGBUILD, then the workflow can push to it."
-            exit 0
-          fi
+          git clone "ssh://aur@aur.archlinux.org/${pkgbase}.git" "$workdir"
           cp PKGBUILD .SRCINFO "$workdir/"
           cd "$workdir"
           git config user.name  "$AUR_USERNAME"
@@ -200,7 +194,14 @@ jobs:
           fi
           git add PKGBUILD .SRCINFO
           git commit -m "upstream ${VERSION}"
-          git push origin master
+          # The AUR only accepts a push for a package base that already exists
+          # in its database (i.e. submitted once through the web UI). Cloning a
+          # not-yet-submitted base succeeds and yields an empty repo, so the
+          # rejection shows up here, on push.
+          if ! git push origin master; then
+            echo "::notice::AUR rejected the push for '${pkgbase}'. Submit the package base once at https://aur.archlinux.org/submit/ with this PKGBUILD; afterwards this workflow can push to it."
+            exit 0
+          fi
 
       - name: Summary
         if: always()
