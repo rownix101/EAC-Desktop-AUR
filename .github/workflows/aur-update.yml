@@ -69,6 +69,12 @@ jobs:
       - name: Mark workspace safe for git
         run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
 
+      - name: Hand the workspace to the build user
+        # makepkg refuses to run as root, and both the updater (which regenerates
+        # .SRCINFO via `makepkg --printsrcinfo`) and the build run it as
+        # $BUILDER_USER. The checkout belongs to root, so hand it over first.
+        run: chown -R builder:builder "$GITHUB_WORKSPACE"
+
       - name: Look for a newer upstream .deb
         id: upstream
         env:
@@ -94,10 +100,6 @@ jobs:
         # is the case inside this container job.
         run: |
           set -euo pipefail
-          # verify.sh re-execs makepkg as $BUILDER_USER, and makepkg refuses to
-          # write into a directory the build user cannot touch. The checkout
-          # belongs to root, so hand it over before validating.
-          chown -R builder:builder "$GITHUB_WORKSPACE"
           chmod +x scripts/*.sh
           ./scripts/verify.sh
           namcap PKGBUILD || true

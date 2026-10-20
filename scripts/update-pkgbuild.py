@@ -178,13 +178,34 @@ def _regen_srcinfo() -> bool:
     if shutil.which("makepkg") is None:
         log("warning: makepkg not found; .SRCINFO left untouched")
         return False
-    proc = subprocess.run(["makepkg", "--printsrcinfo"], capture_output=True, text=True)
+    # makepkg refuses to run as root, and CI runs this inside an Arch container
+    # as root. Drop to the unprivileged build user, exactly like verify.sh does;
+    # --printsrcinfo only reads the PKGBUILD, so no extra ownership is needed.
+    cmd = ["makepkg", "--printsrcinfo"]
+    if os.geteuid() == 0:
+        builder = os.environ.get("BUILDER_USER", "builder")
+        if shutil.which("sudo") and _user_exists(builder):
+            cmd = ["sudo", "-u", builder, "--preserve-env=PWD", *cmd]
+        else:
+            log(f"warning: running as root and no unprivileged '{builder}' user; "
+                f"{SRCINFO} left untouched")
+            return False
+    proc = subprocess.run(cmd, capture_output=True, text=True)
     if proc.returncode != 0:
         log(f"warning: 'makepkg --printsrcinfo' failed: {proc.stderr.strip()}")
         return False
     with open(SRCINFO, "w", encoding="utf-8") as handle:
         handle.write(proc.stdout)
     log(f"regenerated {SRCINFO}")
+    return True
+
+
+def _user_exists(name: str) -> bool:
+    try:
+        import pwd
+        pwd.getpwnam(name)
+    except (ImportError, KeyError):
+        return False
     return True
 
 
