@@ -10,3 +10,4 @@ update.json
 
 # local AUR signing key (never commit)
 .aur-key/
+.cache/
