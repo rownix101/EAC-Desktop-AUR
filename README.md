@@ -44,7 +44,8 @@ dsh-eac-shell
 
 ### Setup
 
-Add these to the repository's *Settings → Secrets and variables → Actions*:
+This repo lives at <https://github.com/rownix101/EAC-Desktop-AUR> and the
+following are already configured in *Settings → Secrets and variables → Actions*:
 
 | Kind | Name | Value |
 | --- | --- | --- |
@@ -52,15 +53,32 @@ Add these to the repository's *Settings → Secrets and variables → Actions*:
 | Variable | `AUR_USERNAME` | Your AUR username |
 | Variable | `AUR_EMAIL` | Optional commit email |
 
-Generate the key pair and register the **public** half at
-<https://aur.archlinux.org/account>:
+The registered public key is:
 
-```bash
-ssh-keygen -t ed25519 -C 'aur-eac' -f ~/.ssh/aur -N ''
 ```
+ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIHz4go6vCrK6MDA3wTl/PZlT4Tuq2SmNLFM8zHNBAZkp aur-eac-desktop
+```
+
+Paste it at <https://aur.archlinux.org/account> → *SSH Public Key*. The matching
+private half is only in the `AUR_SSH_PRIVATE_KEY` secret (and in the local,
+git-ignored `.aur-key/` if you generated it there).
 
 Without the secret the workflow still bumps the `PKGBUILD` and builds it, and
 simply skips the upload.
+
+### First-time AUR submission
+
+The AUR only creates `deepseek-harness-eac-bin.git` after the package has been
+submitted once through the web UI; before that, `git clone` over SSH fails and
+the publish step prints a notice instead of pushing. So, once:
+
+1. Register the public key above on your AUR account.
+2. Go to <https://aur.archlinux.org/submit/> and submit a *package base* named
+   `deepseek-harness-eac-bin` (upload the `PKGBUILD` + `.SRCINFO` from this
+   repo, or the tarball).
+3. Run *Actions → Update AUR package → Run workflow* with **force** ticked.
+
+From then on the scheduled run pushes version bumps on its own.
 
 You can also run it manually from *Actions → Update AUR package → Run workflow*.
 Tick **force** to rebuild and republish the current version with a bumped
