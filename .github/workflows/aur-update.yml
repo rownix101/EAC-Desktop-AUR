@@ -181,7 +181,13 @@ jobs:
           chmod 600 ~/.ssh/config
 
           workdir=$(mktemp -d)
-          git clone "ssh://aur@aur.archlinux.org/${pkgbase}.git" "$workdir"
+          # AUR creates the git repo only after the package has been submitted
+          # once through the web UI; until then the clone fails. Report that as
+          # a notice instead of a red build, because nothing here can fix it.
+          if ! git clone "ssh://aur@aur.archlinux.org/${pkgbase}.git" "$workdir"; then
+            echo "::notice::AUR package '${pkgbase}' does not exist yet. Submit it once at https://aur.archlinux.org/submit/ with this PKGBUILD, then the workflow can push to it."
+            exit 0
+          fi
           cp PKGBUILD .SRCINFO "$workdir/"
           cd "$workdir"
           git config user.name  "$AUR_USERNAME"
