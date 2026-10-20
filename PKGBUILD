@@ -1,4 +1,4 @@
-# Maintainer: Your Name <you@example.com>
+# Maintainer: Rownix <rownix101@gmail.com>
 # Upstream: https://github.com/Ebony-Vinyl/EAC-Desktop (MIT)
 #
 # This package repackages the upstream Debian build; nothing is compiled here.
