@@ -1,0 +1,204 @@
+name: Update AUR package
+
+# Checks upstream EAC-Desktop for a newer amd64 .deb and publishes it to the AUR.
+#
+# Upstream publishes Linux builds only for some releases (v6.0.x are
+# Windows-only), so this workflow does not trust "latest release": it scans every
+# release and takes the newest one that actually ships an amd64 .deb. That logic
+# lives in scripts/update-pkgbuild.py so it can be run and tested locally.
+#
+# Required configuration:
+#   secret  AUR_SSH_PRIVATE_KEY   private key registered with your AUR account
+#   var     AUR_USERNAME          your AUR account name
+#   var     AUR_EMAIL             (optional) commit email
+# Without AUR_SSH_PRIVATE_KEY the workflow still bumps the PKGBUILD and builds it,
+# it just skips the upload.
+
+on:
+  schedule:
+    # Every 6 hours. Upstream ships often; a delayed pickup is harmless while an
+    # eager schedule only burns API quota.
+    - cron: '17 */6 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Republish the current version (bumps pkgrel) even if unchanged'
+        type: boolean
+        default: false
+  push:
+    branches: [main]
+    paths:
+      - 'PKGBUILD'
+      - '.SRCINFO'
+      - 'scripts/**'
+      - '.github/workflows/**'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aur-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    name: Check upstream and publish
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:base-devel
+    env:
+      GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: Install build tooling
+        # bsdtar comes from libarchive, which base-devel already provides.
+        run: |
+          pacman -Syu --noconfirm --needed \
+            git python sudo openssh pacman-contrib namcap jq
+
+      - name: Create build user
+        # makepkg refuses to run as root, and container jobs run as root.
+        run: |
+          useradd -m builder
+          echo 'builder ALL=(ALL) NOPASSWD: ALL' > /etc/sudoers.d/builder
+
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
+
+      - name: Look for a newer upstream .deb
+        id: upstream
+        env:
+          FORCE: ${{ github.event_name == 'workflow_dispatch' && inputs.force }}
+        run: |
+          set -euo pipefail
+          args=(--update)
+          if [[ ${FORCE} == 'true' ]]; then
+            args+=(--force)
+          fi
+          python3 scripts/update-pkgbuild.py "${args[@]}" | tee update.json
+
+      - name: Show what changed
+        run: |
+          if git diff --quiet -- PKGBUILD .SRCINFO; then
+            echo 'No changes to publish.'
+          else
+            git --no-pager diff -- PKGBUILD .SRCINFO
+          fi
+
+      - name: Validate PKGBUILD
+        # verify.sh re-execs makepkg as $BUILDER_USER when it runs as root, which
+        # is the case inside this container job.
+        run: |
+          set -euo pipefail
+          chmod +x scripts/*.sh
+          ./scripts/verify.sh
+          namcap PKGBUILD || true
+
+      - name: Build the package
+        # A real build is the only way to prove the .deb unpacks and that the
+        # payload is intact; it also validates the sha256.
+        # -s installs the runtime dependencies from the PKGBUILD, which a bare
+        # base-devel image does not have (webkit2gtk-4.1 pulls in most of them).
+        run: |
+          set -euo pipefail
+          chown -R builder:builder "$GITHUB_WORKSPACE"
+          cd "$GITHUB_WORKSPACE"
+          sudo -u builder bash -euo pipefail -c 'makepkg -f -s --noconfirm'
+          ls -lh ./*.pkg.tar.*
+
+      - name: Inspect the built package
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          pkg=$(find . -maxdepth 1 -name '*.pkg.tar.*' ! -name '*.sig' -print -quit)
+          [[ -n $pkg ]] || { echo '::error::no package was produced'; exit 1; }
+
+          # The shell must be executable and the sidecar present, otherwise the
+          # app cannot start (see package() in the PKGBUILD).
+          bsdtar -tvf "$pkg" > /tmp/pkg.list
+          grep -q 'usr/bin/dsh-eac-shell' /tmp/pkg.list \
+            || { echo '::error::dsh-eac-shell missing from package'; exit 1; }
+          grep -q 'Deepseek Harness EAC/sidecar/server.js' /tmp/pkg.list \
+            || { echo '::error::sidecar/server.js missing from package'; exit 1; }
+
+          bsdtar -xOf "$pkg" .PKGINFO > /tmp/PKGINFO
+          grep -q '^arch = x86_64' /tmp/PKGINFO \
+            || { echo '::error::package is not x86_64'; exit 1; }
+          namcap "$pkg" || true
+
+      - name: Commit the version bump
+        # Skipped for the bot's own push so the `push` trigger cannot loop.
+        if: >-
+          steps.upstream.outputs.changed == 'true' &&
+          !(github.event_name == 'push' && github.actor == 'github-actions[bot]')
+        run: |
+          set -euo pipefail
+          cd "$GITHUB_WORKSPACE"
+          git config user.name  'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add PKGBUILD .SRCINFO
+          git commit -m "upstream ${{ steps.upstream.outputs.version }} (${{ steps.upstream.outputs.tag }})"
+          git push
+
+      - name: Publish to the AUR
+        if: >-
+          steps.upstream.outputs.changed == 'true' &&
+          !(github.event_name == 'push' && github.actor == 'github-actions[bot]')
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_USERNAME: ${{ vars.AUR_USERNAME }}
+          AUR_EMAIL: ${{ vars.AUR_EMAIL }}
+          VERSION: ${{ steps.upstream.outputs.version }}
+        run: |
+          set -euo pipefail
+          if [[ -z ${AUR_SSH_PRIVATE_KEY:-} ]]; then
+            echo '::notice::AUR_SSH_PRIVATE_KEY is not configured; skipping publish.'
+            exit 0
+          fi
+          : "${AUR_USERNAME:?set the AUR_USERNAME repository variable}"
+
+          pkgbase=$(sed -n 's/^pkgbase = //p' .SRCINFO)
+          [[ -n $pkgbase ]] || { echo '::error::cannot read pkgbase from .SRCINFO'; exit 1; }
+
+          install -d -m 700 ~/.ssh
+          printf '%s\n' "$AUR_SSH_PRIVATE_KEY" > ~/.ssh/aur
+          chmod 600 ~/.ssh/aur
+          ssh-keyscan -t ed25519 aur.archlinux.org >> ~/.ssh/known_hosts 2>/dev/null
+          cat > ~/.ssh/config <<'EOF'
+          Host aur.archlinux.org
+            IdentityFile ~/.ssh/aur
+            User aur
+            StrictHostKeyChecking yes
+          EOF
+          chmod 600 ~/.ssh/config
+
+          workdir=$(mktemp -d)
+          git clone "ssh://aur@aur.archlinux.org/${pkgbase}.git" "$workdir"
+          cp PKGBUILD .SRCINFO "$workdir/"
+          cd "$workdir"
+          git config user.name  "$AUR_USERNAME"
+          git config user.email "${AUR_EMAIL:-$AUR_USERNAME@users.noreply.github.com}"
+          if git diff --quiet; then
+            echo 'AUR is already up to date.'
+            exit 0
+          fi
+          git add PKGBUILD .SRCINFO
+          git commit -m "upstream ${VERSION}"
+          git push origin master
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo '### AUR update'
+            echo
+            echo '| Field | Value |'
+            echo '| --- | --- |'
+            echo "| Newest amd64 .deb | \`${{ steps.upstream.outputs.tag }}\` |"
+            echo "| Version | \`${{ steps.upstream.outputs.version }}\` |"
+            echo "| PKGBUILD changed | \`${{ steps.upstream.outputs.changed }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

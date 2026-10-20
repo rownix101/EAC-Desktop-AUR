@@ -1,0 +1,9 @@
+# makepkg output
+*.pkg.tar.*
+*.pkg.tar.*.sig
+src/
+pkg/
+
+# build artifacts
+update.json
+*.deb
