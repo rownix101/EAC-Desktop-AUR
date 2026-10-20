@@ -32,7 +32,7 @@ dsh-eac-shell
 
 ## How the update automation works
 
-`.github/workflows/aur-update.yml` runs every 6 hours (and on demand):
+`.github/workflows/aur-update.yml` runs every 15 minutes (and on demand):
 
 1. **Find the newest `.deb`.** It scans *all* upstream releases rather than
    looking at "latest release".
@@ -40,7 +40,13 @@ dsh-eac-shell
    `PKGBUILD`, then regenerate `.SRCINFO`.
 3. **Verify.** `scripts/verify.sh`, a real `makepkg` build in an
    `archlinux:base-devel` container, and a check that the payload is intact.
+   These three steps are skipped when the version did not change, so the usual
+   no-op check is quick.
 4. **Commit** the bump, then **push to the AUR**.
+
+GitHub does not guarantee the exact minute for scheduled workflows; under load
+a run can be delayed by tens of minutes. Treat the cadence as "usually within
+15–30 minutes", not a hard promise.
 
 ### Setup
 
@@ -68,9 +74,14 @@ simply skips the upload.
 
 ### First-time AUR submission
 
-The AUR only creates `deepseek-harness-eac-bin.git` after the package has been
-submitted once through the web UI; before that, `git clone` over SSH fails and
-the publish step prints a notice instead of pushing. So, once:
+Already done: the package base `deepseek-harness-eac-bin` exists on the AUR and
+is maintained by `Rownix`. This section is kept for the case where the package
+is deleted and has to be recreated.
+
+The AUR only accepts a push for a package base that already exists in its
+database. Cloning a base that was never submitted *succeeds* and yields an empty
+repository, so the rejection only shows up on `git push` — the publish step
+prints a notice in that case instead of failing the build. To create a base:
 
 1. Register the public key above on your AUR account.
 2. Go to <https://aur.archlinux.org/submit/> and submit a *package base* named

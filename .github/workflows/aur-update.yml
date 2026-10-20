@@ -16,9 +16,12 @@ name: Update AUR package
 
 on:
   schedule:
-    # Every 6 hours. Upstream ships often; a delayed pickup is harmless while an
-    # eager schedule only burns API quota.
-    - cron: '17 */6 * * *'
+    # Every 15 minutes, the tightest cadence GitHub allows to be useful. Most
+    # runs are cheap: the check step finds no new .deb and the build/validate
+    # steps are skipped (see the `if:` on them), so a no-op run is ~30s.
+    # GitHub may still delay scheduled runs under load, so treat this as
+    # "usually within 15-30 minutes", not a guarantee.
+    - cron: '*/15 * * * *'
   workflow_dispatch:
     inputs:
       force:
@@ -44,6 +47,7 @@ jobs:
   update:
     name: Check upstream and publish
     runs-on: ubuntu-latest
+    timeout-minutes: 60
     container:
       image: archlinux:base-devel
     env:
@@ -96,6 +100,14 @@ jobs:
           fi
 
       - name: Validate PKGBUILD
+        # Scheduled runs are every 15 minutes, so the common case is "nothing
+        # changed". Skipping validation then is what keeps a no-op run cheap.
+        # A human push always validates, because the code itself changed; the
+        # bot's own version-bump push is skipped, since the run that produced
+        # it already validated the exact same tree.
+        if: >-
+          steps.upstream.outputs.changed == 'true' ||
+          (github.event_name == 'push' && github.actor != 'github-actions[bot]')
         # verify.sh re-execs makepkg as $BUILDER_USER when it runs as root, which
         # is the case inside this container job.
         run: |
@@ -105,6 +117,9 @@ jobs:
           namcap PKGBUILD || true
 
       - name: Build the package
+        if: >-
+          steps.upstream.outputs.changed == 'true' ||
+          (github.event_name == 'push' && github.actor != 'github-actions[bot]')
         # A real build is the only way to prove the .deb unpacks and that the
         # payload is intact; it also validates the sha256.
         # -s installs the runtime dependencies from the PKGBUILD, which a bare
@@ -117,6 +132,9 @@ jobs:
           ls -lh ./*.pkg.tar.*
 
       - name: Inspect the built package
+        if: >-
+          steps.upstream.outputs.changed == 'true' ||
+          (github.event_name == 'push' && github.actor != 'github-actions[bot]')
         run: |
           set -euo pipefail
           cd "$GITHUB_WORKSPACE"
